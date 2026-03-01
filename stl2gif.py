@@ -2,10 +2,15 @@ import sys
 import subprocess
 import os
 import math
+import argparse
 import importlib.util
 import tkinter as tk
 from tkinter import filedialog
 import time
+import tempfile
+import shutil
+from pathlib import Path
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 # install/check libraries
 def ensure(lib, import_name=None):
@@ -36,6 +41,23 @@ def pick_file():
         filetypes=[("stl files", "*.stl")]
     )
 
+
+def collect_stl_paths(input_path: str, recursive: bool) -> list:
+    """Return a list of .stl file paths from a single file or a directory (optionally recursive)."""
+    p = Path(input_path).resolve()
+    if not p.exists():
+        return []
+    if p.is_file():
+        if p.suffix.lower() == ".stl":
+            return [str(p)]
+        return []
+    # Directory
+    if recursive:
+        stls = list(p.rglob("*.stl"))
+    else:
+        stls = list(p.glob("*.stl"))
+    return sorted(str(f) for f in stls)
+
 def open_file(path):
     try:
         if sys.platform.startswith("win"):
@@ -49,7 +71,13 @@ def open_file(path):
         print(f"Could not open file: {e}")
         return False
 
-def make_rotating_gif(stl_path, duration_seconds=15, fps=20):
+def make_rotating_gif(stl_path, duration_seconds=15, fps=20, rotation_mode="switch", open_result=True, output_dir=None):
+    """
+    rotation_mode: "z" = rotate around vertical (Z) only;
+                   "x" = rotate around horizontal (X) only;
+                   "switch" = original behavior: Z then X then return.
+    output_dir: if set, write the GIF into this directory (using the STL base name).
+    """
     mesh = trimesh.load(stl_path)
     
     # Simplify mesh if it has too many faces (speeds up rendering significantly)
@@ -70,12 +98,16 @@ def make_rotating_gif(stl_path, duration_seconds=15, fps=20):
     mesh.merge_vertices(0.2)
     trimesh.repair.fix_normals(mesh)
     
-    # Create output path in same directory with same name
-    output_path = os.path.splitext(stl_path)[0] + ".gif"
+    # Output path: next to STL or in output_dir if specified
+    base_name = os.path.basename(os.path.splitext(stl_path)[0]) + ".gif"
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+        output_path = os.path.join(output_dir, base_name)
+    else:
+        output_path = os.path.splitext(stl_path)[0] + ".gif"
     
     frames = int(duration_seconds * fps)
-    tmp_dir = "spin_frames"
-    os.makedirs(tmp_dir, exist_ok=True)
+    tmp_dir = tempfile.mkdtemp(prefix="stl2gif_")
     
     # Calculate model dimensions and center
     bounds = mesh.bounds
@@ -129,23 +161,15 @@ def make_rotating_gif(stl_path, duration_seconds=15, fps=20):
     cam_pose[:3, 2] = -forward
     cam_pose[:3, 3] = cam_pos
     
-    # Animation phases:
-    # Phase 1: 3 rotations around vertical (Z) axis while zooming out 10%
-    # Transition: 1 second smooth camera change
-    # Phase 2: 3 rotations around horizontal (X) axis
-    # Transition: 1 second smooth camera change back
-    # Phase 3: Return rotations to start while zooming in 10%
-    
-    transition_frames = int(fps * 0.5)  # 1 second for smooth transition between phases
-    
-    # Split remaining frames into 3 equal phases
+    # Animation phases (for rotation_mode "switch" only):
+    # Phase 1: rotate around Z while zooming out; Phase 2: rotate around X; Phase 3: return
+    transition_frames = int(fps * 0.5) if rotation_mode == "switch" else 0
     remaining = frames - (transition_frames * 2)
-    phase_frames = remaining // 3
-    
-    intro_frames = phase_frames  # Phase 1 with zoom out
-    phase1_frames = 0  # No separate phase 1, it's part of intro
-    phase2_frames = phase_frames  # Phase 2
-    outro_frames = remaining - (phase_frames * 2)  # Phase 3 with zoom in
+    phase_frames = remaining // 3 if rotation_mode == "switch" else frames
+
+    intro_frames = phase_frames if rotation_mode == "switch" else frames
+    phase2_frames = phase_frames if rotation_mode == "switch" else 0
+    outro_frames = remaining - (phase_frames * 2) if rotation_mode == "switch" else 0
     
     # scene setup
     scene = pyrender.Scene(ambient_light=[0.3, 0.3, 0.3])  # Add ambient light to reduce directional light needs
@@ -175,148 +199,134 @@ def make_rotating_gif(stl_path, duration_seconds=15, fps=20):
     
     print(f"Rendering {frames} frames...")
     for i in range(frames):
-        # Determine which camera position to use and interpolate if transitioning
-        if i < intro_frames:
-            # Phase 1: zoom out while rotating
+        if rotation_mode == "z":
             cam_pos = cam_pos_phase1
-        elif i < intro_frames + transition_frames:
-            # Transition 1: smoothly interpolate camera position from phase1 to phase2
-            transition_progress = (i - intro_frames) / transition_frames
-            cam_pos = cam_pos_phase1 + (cam_pos_phase2 - cam_pos_phase1) * transition_progress
-        elif i < intro_frames + transition_frames + phase2_frames:
-            # Phase 2: horizontal rotation
-            cam_pos = cam_pos_phase2
-        elif i < intro_frames + transition_frames + phase2_frames + transition_frames:
-            # Transition 2: smoothly interpolate camera position from phase2 back to phase1
-            transition_progress = (i - intro_frames - transition_frames - phase2_frames) / transition_frames
-            cam_pos = cam_pos_phase2 + (cam_pos_phase1 - cam_pos_phase2) * transition_progress
-        else:
-            # Phase 3: outro with zoom in
-            cam_pos = cam_pos_phase1
-        
-        # Update camera look-at for current position
-        forward = centroid - cam_pos
-        forward = forward / np.linalg.norm(forward)
-        
-        right = np.cross(forward, np.array([0, 0, 1]))
-        right = right / np.linalg.norm(right)
-        
-        up = np.cross(right, forward)
-        
-        cam_pose = np.eye(4)
-        cam_pose[:3, 0] = right
-        cam_pose[:3, 1] = up
-        cam_pose[:3, 2] = -forward
-        cam_pose[:3, 3] = cam_pos
-        
-        scene.set_pose(cam_node, cam_pose)
-        scene.set_pose(light_node, cam_pose)
-        
-        # Determine scale factor for zoom effect - happens during rotation now
-        if i < intro_frames:
-            # Phase 1: zoom out from 90% to 100% while rotating
-            progress = i / intro_frames
-            scale = 0.9 + (0.1 * progress)
-        elif i >= frames - outro_frames:
-            # Phase 3: zoom in from 100% to 90% while rotating
-            progress = (i - (frames - outro_frames)) / outro_frames
-            scale = 1.0 - (0.1 * progress)
-        else:
-            # Middle: normal scale
             scale = 1.0
-        
-        # Determine which rotation phase we're in
-        if i < intro_frames:
-            # Phase 1: Rotate around vertical (Z) axis while zooming
-            phase_progress = i / intro_frames
-            angle = 2 * math.pi * phase_progress * 0.75  # 0.75 rotations
-            
+            angle = 2 * math.pi * (i / frames)
             rotation_matrix = np.array([
                 [math.cos(angle), -math.sin(angle), 0, 0],
                 [math.sin(angle),  math.cos(angle), 0, 0],
                 [0,                0,               1, 0],
                 [0,                0,               0, 1]
             ])
-        elif i < intro_frames + transition_frames:
-            # Transition 1: hold at final angle of phase 1 while camera moves
-            angle = 2 * math.pi * 0.75  # Final angle from phase 1
-            
+        elif rotation_mode == "x":
+            cam_pos = cam_pos_phase1
+            scale = 1.0
+            angle = 2 * math.pi * (i / frames)
             rotation_matrix = np.array([
-                [math.cos(angle), -math.sin(angle), 0, 0],
-                [math.sin(angle),  math.cos(angle), 0, 0],
-                [0,                0,               1, 0],
-                [0,                0,               0, 1]
-            ])
-        elif i < intro_frames + transition_frames + phase2_frames:
-            # Phase 2: Rotate around horizontal (X) axis
-            phase_progress = (i - intro_frames - transition_frames) / phase2_frames
-            angle = 2 * math.pi * phase_progress * 0.75  # 0.75 rotations
-            
-            # Start from where phase 1 ended
-            z_angle = 2 * math.pi * 0.75  # Final angle from phase 1
-            z_rotation = np.array([
-                [math.cos(z_angle), -math.sin(z_angle), 0, 0],
-                [math.sin(z_angle),  math.cos(z_angle), 0, 0],
-                [0,                  0,                 1, 0],
-                [0,                  0,                 0, 1]
-            ])
-            
-            x_rotation = np.array([
                 [1, 0,                0,               0],
                 [0, math.cos(angle), -math.sin(angle), 0],
                 [0, math.sin(angle),  math.cos(angle), 0],
                 [0, 0,                0,               1]
             ])
-            
-            rotation_matrix = z_rotation @ x_rotation
-        elif i < intro_frames + transition_frames + phase2_frames + transition_frames:
-            # Transition 2: hold at final angles while camera moves back
-            z_angle = 2 * math.pi * 0.75
-            x_angle = 2 * math.pi * 0.75
-            
-            z_rotation = np.array([
-                [math.cos(z_angle), -math.sin(z_angle), 0, 0],
-                [math.sin(z_angle),  math.cos(z_angle), 0, 0],
-                [0,                  0,                 1, 0],
-                [0,                  0,                 0, 1]
-            ])
-            
-            x_rotation = np.array([
-                [1, 0,                0,               0],
-                [0, math.cos(x_angle), -math.sin(x_angle), 0],
-                [0, math.sin(x_angle),  math.cos(x_angle), 0],
-                [0, 0,                0,               1]
-            ])
-            
-            rotation_matrix = z_rotation @ x_rotation
         else:
-            # Phase 3: Return to starting position while zooming in
-            z_angle = 2 * math.pi * 0.75  # Final Z angle
-            x_angle = 2 * math.pi * 0.75  # Final X angle
-            
-            # Gradually return to identity
-            outro_progress = (i - (frames - outro_frames)) / outro_frames
-            
-            # Reverse the rotations back to zero
-            current_z = z_angle * (1 - outro_progress)
-            current_x = x_angle * (1 - outro_progress)
-            
-            z_rotation = np.array([
-                [math.cos(current_z), -math.sin(current_z), 0, 0],
-                [math.sin(current_z),  math.cos(current_z), 0, 0],
-                [0,                    0,                   1, 0],
-                [0,                    0,                   0, 1]
-            ])
-            
-            x_rotation = np.array([
-                [1, 0,                    0,                   0],
-                [0, math.cos(current_x), -math.sin(current_x), 0],
-                [0, math.sin(current_x),  math.cos(current_x), 0],
-                [0, 0,                    0,                   1]
-            ])
-            
-            rotation_matrix = z_rotation @ x_rotation
-        
+            # rotation_mode == "switch": multi-phase with zoom and direction switch
+            if i < intro_frames:
+                cam_pos = cam_pos_phase1
+            elif i < intro_frames + transition_frames:
+                transition_progress = (i - intro_frames) / transition_frames
+                cam_pos = cam_pos_phase1 + (cam_pos_phase2 - cam_pos_phase1) * transition_progress
+            elif i < intro_frames + transition_frames + phase2_frames:
+                cam_pos = cam_pos_phase2
+            elif i < intro_frames + transition_frames + phase2_frames + transition_frames:
+                transition_progress = (i - intro_frames - transition_frames - phase2_frames) / transition_frames
+                cam_pos = cam_pos_phase2 + (cam_pos_phase1 - cam_pos_phase2) * transition_progress
+            else:
+                cam_pos = cam_pos_phase1
+
+            if i < intro_frames:
+                progress = i / intro_frames
+                scale = 0.9 + (0.1 * progress)
+            elif i >= frames - outro_frames:
+                progress = (i - (frames - outro_frames)) / outro_frames
+                scale = 1.0 - (0.1 * progress)
+            else:
+                scale = 1.0
+
+            if i < intro_frames:
+                phase_progress = i / intro_frames
+                angle = 2 * math.pi * phase_progress * 0.75
+                rotation_matrix = np.array([
+                    [math.cos(angle), -math.sin(angle), 0, 0],
+                    [math.sin(angle),  math.cos(angle), 0, 0],
+                    [0,                0,               1, 0],
+                    [0,                0,               0, 1]
+                ])
+            elif i < intro_frames + transition_frames:
+                angle = 2 * math.pi * 0.75
+                rotation_matrix = np.array([
+                    [math.cos(angle), -math.sin(angle), 0, 0],
+                    [math.sin(angle),  math.cos(angle), 0, 0],
+                    [0,                0,               1, 0],
+                    [0,                0,               0, 1]
+                ])
+            elif i < intro_frames + transition_frames + phase2_frames:
+                phase_progress = (i - intro_frames - transition_frames) / phase2_frames
+                angle = 2 * math.pi * phase_progress * 0.75
+                z_angle = 2 * math.pi * 0.75
+                z_rotation = np.array([
+                    [math.cos(z_angle), -math.sin(z_angle), 0, 0],
+                    [math.sin(z_angle),  math.cos(z_angle), 0, 0],
+                    [0,                  0,                 1, 0],
+                    [0,                  0,                 0, 1]
+                ])
+                x_rotation = np.array([
+                    [1, 0,                0,               0],
+                    [0, math.cos(angle), -math.sin(angle), 0],
+                    [0, math.sin(angle),  math.cos(angle), 0],
+                    [0, 0,                0,               1]
+                ])
+                rotation_matrix = z_rotation @ x_rotation
+            elif i < intro_frames + transition_frames + phase2_frames + transition_frames:
+                z_angle = 2 * math.pi * 0.75
+                x_angle = 2 * math.pi * 0.75
+                z_rotation = np.array([
+                    [math.cos(z_angle), -math.sin(z_angle), 0, 0],
+                    [math.sin(z_angle),  math.cos(z_angle), 0, 0],
+                    [0,                  0,                 1, 0],
+                    [0,                  0,                 0, 1]
+                ])
+                x_rotation = np.array([
+                    [1, 0,                0,               0],
+                    [0, math.cos(x_angle), -math.sin(x_angle), 0],
+                    [0, math.sin(x_angle),  math.cos(x_angle), 0],
+                    [0, 0,                0,               1]
+                ])
+                rotation_matrix = z_rotation @ x_rotation
+            else:
+                z_angle = 2 * math.pi * 0.75
+                x_angle = 2 * math.pi * 0.75
+                outro_progress = (i - (frames - outro_frames)) / outro_frames
+                current_z = z_angle * (1 - outro_progress)
+                current_x = x_angle * (1 - outro_progress)
+                z_rotation = np.array([
+                    [math.cos(current_z), -math.sin(current_z), 0, 0],
+                    [math.sin(current_z),  math.cos(current_z), 0, 0],
+                    [0,                    0,                   1, 0],
+                    [0,                    0,                   0, 1]
+                ])
+                x_rotation = np.array([
+                    [1, 0,                    0,                   0],
+                    [0, math.cos(current_x), -math.sin(current_x), 0],
+                    [0, math.sin(current_x),  math.cos(current_x), 0],
+                    [0, 0,                    0,                   1]
+                ])
+                rotation_matrix = z_rotation @ x_rotation
+
+        # Update camera look-at for current position
+        forward = centroid - cam_pos
+        forward = forward / np.linalg.norm(forward)
+        right = np.cross(forward, np.array([0, 0, 1]))
+        right = right / np.linalg.norm(right)
+        up = np.cross(right, forward)
+        cam_pose = np.eye(4)
+        cam_pose[:3, 0] = right
+        cam_pose[:3, 1] = up
+        cam_pose[:3, 2] = -forward
+        cam_pose[:3, 3] = cam_pos
+        scene.set_pose(cam_node, cam_pose)
+        scene.set_pose(light_node, cam_pose)
+
         # Apply scale for zoom effect (scale the model, not the camera)
         scale_matrix = np.eye(4)
         scale_matrix[0, 0] = scale
@@ -408,14 +418,170 @@ def make_rotating_gif(stl_path, duration_seconds=15, fps=20):
     print(f"GIF saved in {elapsed:.1f} seconds")
     
     print(f"GIF saved to: {output_path}")
-    
-    # Try to open the file with better error handling
-    if open_file(output_path):
-        print("GIF opened successfully!")
+    try:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+    except OSError:
+        pass
+    if open_result:
+        if open_file(output_path):
+            print("GIF opened successfully!")
+        else:
+            print(f"Please open manually: {output_path}")
+    return output_path
+
+
+def _render_one(stl_path, duration_seconds, fps, rotation_mode, output_dir):
+    """Worker for parallel rendering: returns (stl_path, output_path or None, error_msg or None)."""
+    try:
+        out = make_rotating_gif(
+            stl_path,
+            duration_seconds=duration_seconds,
+            fps=fps,
+            rotation_mode=rotation_mode,
+            open_result=False,
+            output_dir=output_dir,
+        )
+        return (stl_path, out, None)
+    except Exception as e:
+        return (stl_path, None, str(e))
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Render STL model(s) to rotating GIF(s).",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python stl2gif.py model.stl
+  python stl2gif.py --path model.stl --rotation z
+  python stl2gif.py ./models --recursive -o ./gifs
+  python stl2gif.py ./models -j 4 -o ./gifs
+  python stl2gif.py                    (no args: open file picker)
+        """,
+    )
+    parser.add_argument(
+        "input",
+        nargs="?",
+        default=None,
+        help="Path to a single .stl file or a directory containing .stl files",
+    )
+    parser.add_argument(
+        "-p", "--path",
+        default=None,
+        metavar="PATH",
+        help="Same as positional input: path to a .stl file or directory",
+    )
+    parser.add_argument(
+        "-r", "--recursive",
+        action="store_true",
+        help="If input is a directory, recurse into subdirectories to find .stl files",
+    )
+    parser.add_argument(
+        "--rotation", "-rot",
+        choices=["z", "x", "switch"],
+        default="switch",
+        help="Rotation mode: z = vertical (Z) only, x = horizontal (X) only, switch = Z then X then return (default)",
+    )
+    parser.add_argument(
+        "--duration", "-d",
+        type=float,
+        default=15,
+        help="GIF duration in seconds (default: 15)",
+    )
+    parser.add_argument(
+        "--fps",
+        type=int,
+        default=20,
+        help="Frames per second (default: 20)",
+    )
+    parser.add_argument(
+        "--no-open",
+        action="store_true",
+        help="Do not open the output GIF after rendering",
+    )
+    parser.add_argument(
+        "-o", "--output-dir",
+        default=None,
+        metavar="DIR",
+        help="Write all output GIFs into this directory (default: next to each .stl)",
+    )
+    parser.add_argument(
+        "-j", "--workers",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Run up to N renders in parallel (default: 1)",
+    )
+    args = parser.parse_args()
+    input_path = args.path or args.input
+
+    if input_path is None:
+        f = pick_file()
+        if f:
+            make_rotating_gif(
+                f,
+                duration_seconds=args.duration,
+                fps=args.fps,
+                rotation_mode=args.rotation,
+                open_result=not args.no_open,
+                output_dir=args.output_dir,
+            )
+        return
+
+    paths = collect_stl_paths(input_path, args.recursive)
+    if not paths:
+        print(f"No .stl files found at: {input_path}")
+        if os.path.isdir(input_path):
+            print("Tip: use --recursive to search subdirectories.")
+        sys.exit(1)
+
+    print(f"Found {len(paths)} .stl file(s).")
+    workers = max(1, args.workers)
+    single = len(paths) == 1
+
+    if workers == 1 or single:
+        for stl_path in paths:
+            print(f"\n--- {stl_path} ---")
+            make_rotating_gif(
+                stl_path,
+                duration_seconds=args.duration,
+                fps=args.fps,
+                rotation_mode=args.rotation,
+                open_result=not args.no_open and single,
+                output_dir=args.output_dir,
+            )
     else:
-        print(f"Please open manually: {output_path}")
+        n = min(workers, len(paths))
+        print(f"Running {n} worker(s) in parallel...")
+        done = 0
+        failed = []
+        with ProcessPoolExecutor(max_workers=n) as executor:
+            futures = {
+                executor.submit(
+                    _render_one,
+                    stl_path,
+                    args.duration,
+                    args.fps,
+                    args.rotation,
+                    args.output_dir,
+                ): stl_path
+                for stl_path in paths
+            }
+            for future in as_completed(futures):
+                stl_path, output_path, err = future.result()
+                done += 1
+                if err:
+                    failed.append((stl_path, err))
+                    print(f"\r[{done}/{len(paths)}] FAILED: {os.path.basename(stl_path)}: {err}", flush=True)
+                else:
+                    print(f"\r[{done}/{len(paths)}] OK: {os.path.basename(stl_path)} -> {output_path}", flush=True)
+        if failed:
+            print(f"\n{len(failed)} failed:")
+            for stl_path, err in failed:
+                print(f"  {stl_path}: {err}")
+        if len(paths) > 1:
+            print(f"\nDone. Rendered {len(paths) - len(failed)}/{len(paths)} GIF(s).")
+
 
 if __name__ == "__main__":
-    f = pick_file()
-    if f:
-        make_rotating_gif(f)
+    main()

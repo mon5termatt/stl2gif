@@ -1,0 +1,6 @@
+numpy
+trimesh
+pyrender
+imageio
+Pillow
+pyfqmr
