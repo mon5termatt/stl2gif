@@ -21,11 +21,11 @@ Without an input path, a file picker opens. With a path you can pass a single fi
 | `input` | Single `.stl` file or directory (optional; omit for file picker) |
 | `-p`, `--path` | Same as positional input: path to a `.stl` file or directory |
 | `-r`, `--recursive` | If input is a directory, find `.stl` files in subdirectories too |
-| `--rotation`, `-rot` | `z` = vertical only, `x` = horizontal only, `switch` = Z then X then return (default) |
-| `--duration`, `-d` | GIF duration in seconds (default: 15) |
-| `--fps` | Frames per second (default: 20) |
+| `-rot`, `--rotation` | `z` = vertical only, `x` = horizontal only, `switch` = Z then X then return (default) |
+| `-d`, `--duration` | GIF duration in seconds (default: 15) |
 | `-o`, `--output-dir` | Write all output GIFs into this directory (default: next to each .stl) |
 | `-j`, `--workers` | Run up to N renders in parallel (default: 1) |
+| `--fps` | Frames per second (default: 20) |
 | `--no-open` | Don’t open the output GIF after rendering |
 
 **Examples**
