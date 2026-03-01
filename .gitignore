@@ -1,0 +1,24 @@
+# Output and temp
+spin_frames/
+gifs/
+gifs-textured/
+*.gif
+
+# Venv
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
