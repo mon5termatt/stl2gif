@@ -457,7 +457,7 @@ def make_rotating_gif(stl_path, duration_seconds=15, fps=20, rotation_mode="swit
     return output_path
 
 
-def _render_one(stl_path, duration_seconds, fps, rotation_mode, output_dir, zoom):
+def _render_one(stl_path, duration_seconds, fps, rotation_mode, output_dir, zoom, verbose=False):
     """Worker for parallel rendering: returns (stl_path, output_path or None, error_msg or None)."""
     try:
         out = make_rotating_gif(
@@ -468,7 +468,7 @@ def _render_one(stl_path, duration_seconds, fps, rotation_mode, output_dir, zoom
             open_result=False,
             output_dir=output_dir,
             zoom=zoom,
-            verbose=False,
+            verbose=verbose,
         )
         return (stl_path, out, None)
     except Exception as e:
@@ -549,6 +549,11 @@ Examples:
         metavar="FACTOR",
         help="Zoom level: 1.0 = default, >1 = zoom in (model larger), <1 = zoom out (default: 1.0)",
     )
+    parser.add_argument(
+        "-v", "--verbose",
+        action="store_true",
+        help="Show progress output from each worker when running in parallel (default: quiet when -j > 1)",
+    )
     args = parser.parse_args()
     input_path = args.path or args.input
 
@@ -605,6 +610,7 @@ Examples:
                     args.rotation,
                     args.output_dir,
                     args.zoom,
+                    args.verbose,
                 ): stl_path
                 for stl_path in paths
             }

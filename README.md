@@ -28,6 +28,7 @@ Without an input path, a file picker opens. With a path you can pass a single fi
 | `-o`, `--output-dir` | Write all output GIFs into this directory (default: next to each .stl) |
 | `-j`, `--workers` | Run up to N renders in parallel (default: 1) |
 | `-z`, `--zoom` | Zoom level: 1.0 = default, >1 = zoom in, <1 = zoom out |
+| `-v`, `--verbose` | Show progress from each worker when using `-j` (default: quiet in parallel) |
 | `--fps` | Frames per second (default: 20) |
 | `--no-open` | Don’t open the output GIF after rendering |
 
