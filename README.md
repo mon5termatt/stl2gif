@@ -39,6 +39,7 @@ python stl2gif.py model.stl --rotation z
 python stl2gif.py ./models --recursive --rotation x
 python stl2gif.py ./models -o ./gifs
 python stl2gif.py ./models -j 4 -o ./gifs
+.\run.ps1 -p ".\Path\To\Models" -r --no-open --fps 30 -rot z -d 5 -o gifs -j 10 -z 2
 ```
 
 **Library requirements:** numpy, trimesh, pyrender, imageio, Pillow, pyfqmr, lxml, networkx (see `requirements.txt`). 3MF support needs lxml and networkx. The script can auto-install them if not in a venv; using a venv avoids touching your global Python.
