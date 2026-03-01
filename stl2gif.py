@@ -22,8 +22,8 @@ def ensure(lib, import_name=None):
     print(f"{lib} missing, installing...")
     subprocess.run([sys.executable, "-m", "pip", "install", lib], check=True)
 
-# ensure all required packages
-for lib, import_name in [("numpy", None), ("trimesh", None), ("pyrender", None), ("imageio", None), ("Pillow", "PIL"), ("pyfqmr", None)]:
+# ensure all required packages (lxml, networkx for 3MF support)
+for lib, import_name in [("numpy", None), ("trimesh", None), ("pyrender", None), ("imageio", None), ("Pillow", "PIL"), ("pyfqmr", None), ("lxml", None), ("networkx", None)]:
     ensure(lib, import_name)
 
 # imports after install
@@ -33,30 +33,35 @@ import pyrender
 import imageio
 from PIL import Image, ImageDraw, ImageFont
 
+# Supported 3D mesh file extensions
+MESH_EXTENSIONS = (".stl", ".3mf")
+
 def pick_file():
     root = tk.Tk()
     root.withdraw()
     return filedialog.askopenfilename(
-        title="select stl",
-        filetypes=[("stl files", "*.stl")]
+        title="Select mesh file",
+        filetypes=[("mesh files", "*.stl *.3mf"), ("STL files", "*.stl"), ("3MF files", "*.3mf"), ("All files", "*.*")]
     )
 
 
-def collect_stl_paths(input_path: str, recursive: bool) -> list:
-    """Return a list of .stl file paths from a single file or a directory (optionally recursive)."""
+def collect_mesh_paths(input_path: str, recursive: bool) -> list:
+    """Return a list of .stl and .3mf file paths from a single file or a directory (optionally recursive)."""
     p = Path(input_path).resolve()
     if not p.exists():
         return []
     if p.is_file():
-        if p.suffix.lower() == ".stl":
+        if p.suffix.lower() in MESH_EXTENSIONS:
             return [str(p)]
         return []
     # Directory
-    if recursive:
-        stls = list(p.rglob("*.stl"))
-    else:
-        stls = list(p.glob("*.stl"))
-    return sorted(str(f) for f in stls)
+    paths = []
+    for ext in MESH_EXTENSIONS:
+        if recursive:
+            paths.extend(p.rglob(f"*{ext}"))
+        else:
+            paths.extend(p.glob(f"*{ext}"))
+    return sorted(str(f) for f in paths)
 
 def open_file(path):
     try:
@@ -71,29 +76,45 @@ def open_file(path):
         print(f"Could not open file: {e}")
         return False
 
-def make_rotating_gif(stl_path, duration_seconds=15, fps=20, rotation_mode="switch", open_result=True, output_dir=None):
+def make_rotating_gif(stl_path, duration_seconds=15, fps=20, rotation_mode="switch", open_result=True, output_dir=None, zoom=1.0, verbose=True):
     """
-    rotation_mode: "z" = rotate around vertical (Z) only;
-                   "x" = rotate around horizontal (X) only;
-                   "switch" = original behavior: Z then X then return.
+    rotation_mode: "z" = spin around vertical axis (horizontal spin, turntable);
+                   "x" = rotate around horizontal axis (tilt);
+                   "switch" = Z then X then return.
     output_dir: if set, write the GIF into this directory (using the STL base name).
+    zoom: 1.0 = default framing; >1 = zoom in (model larger), <1 = zoom out (model smaller).
+    verbose: if False, suppress progress output (use when running parallel workers).
     """
-    mesh = trimesh.load(stl_path)
+    # force='mesh' so 3MF/Scene files are merged into a single mesh when possible
+    loaded = trimesh.load(stl_path, force="mesh")
+    if isinstance(loaded, trimesh.Trimesh):
+        mesh = loaded
+    else:
+        # Scene (e.g. 3MF with multiple objects): merge all geometry into one mesh
+        geos = list(loaded.geometry.values()) if hasattr(loaded, "geometry") else []
+        if not geos:
+            raise ValueError(f"No mesh geometry found in {stl_path}")
+        mesh = trimesh.util.concatenate(geos)
     
     # Simplify mesh if it has too many faces (speeds up rendering significantly)
     if len(mesh.faces) > 50000:
-        print(f"Simplifying mesh from {len(mesh.faces)} faces...")
+        if verbose:
+            print(f"Simplifying mesh from {len(mesh.faces)} faces...")
         try:
             mesh = mesh.simplify_quadric_decimation(50000)
-            print(f"Simplified to {len(mesh.faces)} faces")
+            if verbose:
+                print(f"Simplified to {len(mesh.faces)} faces")
         except Exception as e:
-            print(f"Quadric decimation failed, trying alternate method...")
+            if verbose:
+                print(f"Quadric decimation failed, trying alternate method...")
             try:
                 # Fallback to vertex clustering
                 mesh = mesh.simplify_vertex_clustering(voxel_size=mesh.extents.max() / 100)
-                print(f"Simplified to {len(mesh.faces)} faces using vertex clustering")
+                if verbose:
+                    print(f"Simplified to {len(mesh.faces)} faces using vertex clustering")
             except Exception as e2:
-                print(f"Simplification not available, continuing with full mesh (may be slower)")
+                if verbose:
+                    print(f"Simplification not available, continuing with full mesh (may be slower)")
     
     mesh.merge_vertices(0.2)
     trimesh.repair.fix_normals(mesh)
@@ -132,8 +153,8 @@ def make_rotating_gif(stl_path, duration_seconds=15, fps=20, rotation_mode="swit
     vertical_cam_distance = vertical_dim / (2 * target_coverage * math.tan(fov / 2))
     
     # Use the larger of the two to ensure model fits in both rotations
-    phase1_cam_distance = max(base_cam_distance, vertical_cam_distance * 0.8)
-    phase2_cam_distance = max(base_cam_distance, vertical_cam_distance * 0.95)  # Less zoomed out
+    phase1_cam_distance = max(base_cam_distance, vertical_cam_distance * 0.8) / zoom
+    phase2_cam_distance = max(base_cam_distance, vertical_cam_distance * 0.95) / zoom  # Less zoomed out
     
     # Position camera for fixed isometric view (use phase1 distance initially)
     cam_height = phase1_cam_distance * math.sin(iso_angle)
@@ -197,7 +218,8 @@ def make_rotating_gif(stl_path, duration_seconds=15, fps=20, rotation_mode="swit
         except:
             font = ImageFont.load_default()
     
-    print(f"Rendering {frames} frames...")
+    if verbose:
+        print(f"Rendering {frames} frames...")
     for i in range(frames):
         if rotation_mode == "z":
             cam_pos = cam_pos_phase1
@@ -376,16 +398,17 @@ def make_rotating_gif(stl_path, duration_seconds=15, fps=20, rotation_mode="swit
         
         img.save(f"{tmp_dir}/f_{i:04d}.png")
         
-        # Progress bar
-        percent = ((i + 1) / frames) * 100
-        bar_width = 40
-        filled = int(bar_width * (i + 1) / frames)
-        bar = '█' * filled + '░' * (bar_width - filled)
-        print(f"\rRendering: [{bar}] {percent:.1f}%", end='', flush=True)
+        # Progress bar (only when verbose to avoid interleaving with parallel workers)
+        if verbose:
+            percent = ((i + 1) / frames) * 100
+            bar_width = 40
+            filled = int(bar_width * (i + 1) / frames)
+            bar = '█' * filled + '░' * (bar_width - filled)
+            print(f"\rRendering: [{bar}] {percent:.1f}%", end='', flush=True)
     
-    print()  # New line after progress bar
-    
-    print("Compiling GIF...")
+    if verbose:
+        print()  # New line after progress bar
+        print("Compiling GIF...")
     # Use pillow mode for faster compilation with optimization
     imgs = []
     for i in range(frames):
@@ -393,14 +416,16 @@ def make_rotating_gif(stl_path, duration_seconds=15, fps=20, rotation_mode="swit
         imgs.append(img)
         
         # Progress bar for loading images
-        percent = ((i + 1) / frames) * 100
-        bar_width = 40
-        filled = int(bar_width * (i + 1) / frames)
-        bar = '█' * filled + '░' * (bar_width - filled)
-        print(f"\rLoading frames: [{bar}] {percent:.1f}%", end='', flush=True)
+        if verbose:
+            percent = ((i + 1) / frames) * 100
+            bar_width = 40
+            filled = int(bar_width * (i + 1) / frames)
+            bar = '█' * filled + '░' * (bar_width - filled)
+            print(f"\rLoading frames: [{bar}] {percent:.1f}%", end='', flush=True)
     
-    print()  # New line
-    print("Saving GIF (this may take a moment)...")
+    if verbose:
+        print()
+        print("Saving GIF (this may take a moment)...")
     
     start_time = time.time()
     
@@ -415,22 +440,24 @@ def make_rotating_gif(stl_path, duration_seconds=15, fps=20, rotation_mode="swit
     )
     
     elapsed = time.time() - start_time
-    print(f"GIF saved in {elapsed:.1f} seconds")
-    
-    print(f"GIF saved to: {output_path}")
+    if verbose:
+        print(f"GIF saved in {elapsed:.1f} seconds")
+        print(f"GIF saved to: {output_path}")
     try:
         shutil.rmtree(tmp_dir, ignore_errors=True)
     except OSError:
         pass
     if open_result:
         if open_file(output_path):
-            print("GIF opened successfully!")
+            if verbose:
+                print("GIF opened successfully!")
         else:
-            print(f"Please open manually: {output_path}")
+            if verbose:
+                print(f"Please open manually: {output_path}")
     return output_path
 
 
-def _render_one(stl_path, duration_seconds, fps, rotation_mode, output_dir):
+def _render_one(stl_path, duration_seconds, fps, rotation_mode, output_dir, zoom):
     """Worker for parallel rendering: returns (stl_path, output_path or None, error_msg or None)."""
     try:
         out = make_rotating_gif(
@@ -440,6 +467,8 @@ def _render_one(stl_path, duration_seconds, fps, rotation_mode, output_dir):
             rotation_mode=rotation_mode,
             open_result=False,
             output_dir=output_dir,
+            zoom=zoom,
+            verbose=False,
         )
         return (stl_path, out, None)
     except Exception as e:
@@ -453,6 +482,7 @@ def main():
         epilog="""
 Examples:
   python stl2gif.py model.stl
+  python stl2gif.py model.3mf --rotation z
   python stl2gif.py --path model.stl --rotation z
   python stl2gif.py ./models --recursive -o ./gifs
   python stl2gif.py ./models -j 4 -o ./gifs
@@ -463,24 +493,24 @@ Examples:
         "input",
         nargs="?",
         default=None,
-        help="Path to a single .stl file or a directory containing .stl files",
+        help="Path to a single .stl/.3mf file or a directory containing mesh files",
     )
     parser.add_argument(
         "-p", "--path",
         default=None,
         metavar="PATH",
-        help="Same as positional input: path to a .stl file or directory",
+        help="Same as positional input: path to a .stl/.3mf file or directory",
     )
     parser.add_argument(
         "-r", "--recursive",
         action="store_true",
-        help="If input is a directory, recurse into subdirectories to find .stl files",
+        help="If input is a directory, recurse into subdirectories to find .stl/.3mf files",
     )
     parser.add_argument(
         "--rotation", "-rot",
         choices=["z", "x", "switch"],
         default="switch",
-        help="Rotation mode: z = vertical (Z) only, x = horizontal (X) only, switch = Z then X then return (default)",
+        help="Rotation: z = spin around vertical (turntable), x = tilt around horizontal, switch = Z then X then return (default)",
     )
     parser.add_argument(
         "--duration", "-d",
@@ -503,7 +533,7 @@ Examples:
         "-o", "--output-dir",
         default=None,
         metavar="DIR",
-        help="Write all output GIFs into this directory (default: next to each .stl)",
+        help="Write all output GIFs into this directory (default: next to each source file)",
     )
     parser.add_argument(
         "-j", "--workers",
@@ -511,6 +541,13 @@ Examples:
         default=1,
         metavar="N",
         help="Run up to N renders in parallel (default: 1)",
+    )
+    parser.add_argument(
+        "-z", "--zoom",
+        type=float,
+        default=1.0,
+        metavar="FACTOR",
+        help="Zoom level: 1.0 = default, >1 = zoom in (model larger), <1 = zoom out (default: 1.0)",
     )
     args = parser.parse_args()
     input_path = args.path or args.input
@@ -525,17 +562,18 @@ Examples:
                 rotation_mode=args.rotation,
                 open_result=not args.no_open,
                 output_dir=args.output_dir,
+                zoom=args.zoom,
             )
         return
 
-    paths = collect_stl_paths(input_path, args.recursive)
+    paths = collect_mesh_paths(input_path, args.recursive)
     if not paths:
-        print(f"No .stl files found at: {input_path}")
+        print(f"No .stl or .3mf files found at: {input_path}")
         if os.path.isdir(input_path):
             print("Tip: use --recursive to search subdirectories.")
         sys.exit(1)
 
-    print(f"Found {len(paths)} .stl file(s).")
+    print(f"Found {len(paths)} mesh file(s).")
     workers = max(1, args.workers)
     single = len(paths) == 1
 
@@ -549,6 +587,8 @@ Examples:
                 rotation_mode=args.rotation,
                 open_result=not args.no_open and single,
                 output_dir=args.output_dir,
+                zoom=args.zoom,
+                verbose=True,
             )
     else:
         n = min(workers, len(paths))
@@ -564,6 +604,7 @@ Examples:
                     args.fps,
                     args.rotation,
                     args.output_dir,
+                    args.zoom,
                 ): stl_path
                 for stl_path in paths
             }
@@ -572,9 +613,9 @@ Examples:
                 done += 1
                 if err:
                     failed.append((stl_path, err))
-                    print(f"\r[{done}/{len(paths)}] FAILED: {os.path.basename(stl_path)}: {err}", flush=True)
+                    print(f"[{done}/{len(paths)}] FAILED: {os.path.basename(stl_path)}: {err}", flush=True)
                 else:
-                    print(f"\r[{done}/{len(paths)}] OK: {os.path.basename(stl_path)} -> {output_path}", flush=True)
+                    print(f"[{done}/{len(paths)}] OK: {os.path.basename(stl_path)} -> {output_path}", flush=True)
         if failed:
             print(f"\n{len(failed)} failed:")
             for stl_path, err in failed:

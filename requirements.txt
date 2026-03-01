@@ -4,3 +4,5 @@ pyrender
 imageio
 Pillow
 pyfqmr
+lxml
+networkx

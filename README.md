@@ -1,4 +1,4 @@
-Takes a 3D model in STL and renders a quick isometric animation (one axis, or switch between axes with a zoom/return loop).
+Takes a 3D model (STL or 3MF) and renders a quick isometric animation (one axis, or switch between axes with a zoom/return loop).
 
 ### Run in a virtual environment (recommended)
 
@@ -11,6 +11,8 @@ python -m venv .venv
 pip install -r requirements.txt
 python stl2gif.py
 ```
+> [!CAUTION]
+> **3MF support is experimental.** It may not work for all models.
 
 Without an input path, a file picker opens. With a path you can pass a single file or a folder (optionally with `--recursive`).
 
@@ -18,13 +20,14 @@ Without an input path, a file picker opens. With a path you can pass a single fi
 
 | Flag | Description |
 |------|-------------|
-| `input` | Single `.stl` file or directory (optional; omit for file picker) |
-| `-p`, `--path` | Same as positional input: path to a `.stl` file or directory |
-| `-r`, `--recursive` | If input is a directory, find `.stl` files in subdirectories too |
-| `-rot`, `--rotation` | `z` = vertical only, `x` = horizontal only, `switch` = Z then X then return (default) |
+| `input` | Single `.stl` or `.3mf` file or directory (optional; omit for file picker) |
+| `-p`, `--path` | Same as positional input: path to a mesh file or directory |
+| `-r`, `--recursive` | If input is a directory, find `.stl`/`.3mf` files in subdirectories too |
+| `-rot`, `--rotation` | `z` = spin around vertical (turntable), `x` = tilt around horizontal, `switch` = Z then X then return (default) |
 | `-d`, `--duration` | GIF duration in seconds (default: 15) |
 | `-o`, `--output-dir` | Write all output GIFs into this directory (default: next to each .stl) |
 | `-j`, `--workers` | Run up to N renders in parallel (default: 1) |
+| `-z`, `--zoom` | Zoom level: 1.0 = default, >1 = zoom in, <1 = zoom out |
 | `--fps` | Frames per second (default: 20) |
 | `--no-open` | Don’t open the output GIF after rendering |
 
@@ -38,4 +41,4 @@ python stl2gif.py ./models -o ./gifs
 python stl2gif.py ./models -j 4 -o ./gifs
 ```
 
-**Library requirements:** numpy, trimesh, pyrender, imageio, Pillow, pyfqmr (see `requirements.txt`). The script can auto-install them if not in a venv; using a venv avoids touching your global Python.
+**Library requirements:** numpy, trimesh, pyrender, imageio, Pillow, pyfqmr, lxml, networkx (see `requirements.txt`). 3MF support needs lxml and networkx. The script can auto-install them if not in a venv; using a venv avoids touching your global Python.
